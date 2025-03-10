@@ -1,0 +1,158 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torchtext
+from torchtext.datasets import IMDB
+from torchtext.data import Field, BucketIterator
+
+# Set random seed for reproducibility
+torch.manual_seed(42)
+
+# Define the Fields (how we process the data)
+TEXT = Field(sequential=True, tokenize='spacy', batch_first=True, include_lengths=True)
+LABEL = Field(sequential=False, use_vocab=False, is_target=True)
+
+# Load the IMDB dataset
+train_data, test_data = IMDB.splits(TEXT, LABEL)
+
+# Build vocabulary using pre-trained embeddings for better performance (optional)
+TEXT.build_vocab(train_data, max_size=25000, vectors="glove.6B.100d", unk_init=torch.Tensor.normal_)
+
+# Create iterators for batching
+BATCH_SIZE = 64
+train_iterator, test_iterator = BucketIterator.splits(
+    (train_data, test_data),
+    batch_size=BATCH_SIZE,
+    device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
+    sort_within_batch=True,
+    sort_key=lambda x: len(x.text)
+)
+
+# Build the Model
+class SentimentModel(nn.Module):
+    def __init__(self, input_dim, embedding_dim, hidden_dim, output_dim, dropout):
+        super(SentimentModel, self).__init__()
+        
+        # Embedding layer (word embeddings)
+        self.embedding = nn.Embedding(input_dim, embedding_dim)
+        
+        # LSTM layer
+        self.lstm = nn.LSTM(embedding_dim, hidden_dim, batch_first=True)
+        
+        # Dropout to prevent overfitting
+        self.dropout = nn.Dropout(dropout)
+        
+        # Fully connected output layer
+        self.fc = nn.Linear(hidden_dim, output_dim)
+        
+        # Sigmoid activation for binary classification
+        self.sigmoid = nn.Sigmoid()
+    
+    def forward(self, text, text_lengths):
+        embedded = self.embedding(text)
+        
+        # Pack padded sequences for better efficiency with RNNs
+        packed_embedded = nn.utils.rnn.pack_padded_sequence(embedded, text_lengths, batch_first=True, enforce_sorted=False)
+        
+        # Pass through LSTM
+        packed_output, (hidden, cell) = self.lstm(packed_embedded)
+        
+        # Apply dropout
+        hidden = self.dropout(hidden[-1])
+        
+        # Fully connected layer for output
+        output = self.fc(hidden)
+        
+        # Apply sigmoid activation for binary classification
+        output = self.sigmoid(output)
+        return output
+
+# Initialize the model
+input_dim = len(TEXT.vocab)
+embedding_dim = 100  # Using GloVe 100d embeddings
+hidden_dim = 256
+output_dim = 1  # Binary classification
+dropout = 0.5
+
+model = SentimentModel(input_dim, embedding_dim, hidden_dim, output_dim, dropout)
+
+# Load pre-trained embeddings (optional, using GloVe embeddings)
+model.embedding.weight.data.copy_(TEXT.vocab.vectors)
+
+# Initialize the optimizer and loss function
+optimizer = optim.Adam(model.parameters())
+criterion = nn.BCELoss()  # Binary Cross-Entropy loss
+
+# Move the model to GPU if available
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model.to(device)
+criterion.to(device)
+
+# Training the Model
+def train(model, iterator, optimizer, criterion):
+    model.train()
+    epoch_loss = 0
+    epoch_acc = 0
+
+    for batch in iterator:
+        text, text_lengths = batch.text
+        labels = batch.label
+
+        # Move to GPU if available
+        text, labels = text.to(device), labels.to(device)
+
+        optimizer.zero_grad()
+
+        # Forward pass
+        predictions = model(text, text_lengths).squeeze(1)
+
+        # Calculate loss
+        loss = criterion(predictions, labels.float())
+        acc = binary_accuracy(predictions, labels)
+
+        # Backpropagation
+        loss.backward()
+        optimizer.step()
+
+        epoch_loss += loss.item()
+        epoch_acc += acc.item()
+
+    return epoch_loss / len(iterator), epoch_acc / len(iterator)
+
+# Evaluate the Model
+def evaluate(model, iterator, criterion):
+    model.eval()
+    epoch_loss = 0
+    epoch_acc = 0
+
+    with torch.no_grad():
+        for batch in iterator:
+            text, text_lengths = batch.text
+            labels = batch.label
+
+            text, labels = text.to(device), labels.to(device)
+
+            predictions = model(text, text_lengths).squeeze(1)
+            loss = criterion(predictions, labels.float())
+            acc = binary_accuracy(predictions, labels)
+
+            epoch_loss += loss.item()
+            epoch_acc += acc.item()
+
+    return epoch_loss / len(iterator), epoch_acc / len(iterator)
+
+# Binary accuracy calculation
+def binary_accuracy(predictions, labels):
+    rounded_preds = torch.round(predictions)
+    correct = (rounded_preds == labels).float() 
+    return correct.sum() / len(correct)
+
+# Training loop
+N_EPOCHS = 5
+for epoch in range(N_EPOCHS):
+    train_loss, train_acc = train(model, train_iterator, optimizer, criterion)
+    valid_loss, valid_acc = evaluate(model, test_iterator, criterion)
+
+    print(f"Epoch {epoch+1}")
+    print(f"Train Loss: {train_loss:.3f} | Train Acc: {train_acc*100:.2f}%")
+    print(f"Valid Loss: {valid_loss:.3f} | Valid Acc: {valid_acc*100:.2f}%")

@@ -1,0 +1,20 @@
+def predict_sentiment(model, sentence, TEXT):
+    model.eval()
+    tokens = [tok.text for tok in spacy.load('en_core_web_sm')(sentence)]
+    indexed = [TEXT.vocab.stoi[tok] for tok in tokens]
+    length = [len(indexed)]
+    tensor = torch.LongTensor(indexed).unsqueeze(0)
+    length_tensor = torch.LongTensor(length)
+    tensor = tensor.to(device)
+    length_tensor = length_tensor.to(device)
+    
+    prediction = model(tensor, length_tensor)
+    return prediction.item()
+
+sentence = "I absolutely loved this movie!"
+pred = predict_sentiment(model, sentence, TEXT)
+
+if pred >= 0.5:
+    print(f"Positive review with probability: {pred}")
+else:
+    print(f"Negative review with probability: {1 - pred}")
